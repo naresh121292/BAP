@@ -5,9 +5,41 @@ let collections = {
     raneLogsLive: 'Log_Rane_Live'
 };
 let dbCredentials = {
-    localHost: "mongodb://api-dev.lime.ai:27017/",
-    dbName: "db",
+    localHost: "mongodb://baas_dev_pnc_user:kCxagTLm0xUnvSvXEYWQj44X7wYv7Wxn@api-dev.lime.ai:27017/",
+    dbName: "baas_dev_pnc",
 };
+function insertSorted(arr, item, comparator) {
+    if (comparator == null) {
+        // emulate the default Array.sort() comparator
+        comparator = function (a, b) {
+            if (typeof a !== 'string') a = String(a);
+            if (typeof b !== 'string') b = String(b);
+            return (a > b ? 1 : (a < b ? -1 : 0));
+        };
+    }
+
+    // get the index we need to insert the item at
+    var min = 0;
+    var max = arr.length;
+    var index = Math.floor((min + max) / 2);
+    while (max > min) {
+        if (comparator(item, arr[index]) < 0) {
+            max = index;
+        } else {
+            min = index + 1;
+        }
+        index = Math.floor((min + max) / 2);
+    }
+
+    // insert the item
+    arr.splice(index, 0, item);
+};
+
+async function getBatData(db, options) {
+    let data = await db.collection(collections.raneLogsHistory).aggregate(options,
+        { allowDiskUse: true }).toArray();
+    return data;
+}
 
 MongoClient.connect(dbCredentials.localHost, { useNewUrlParser: true, useUnifiedTopology: true },
     async function (err, client) {
@@ -28,29 +60,62 @@ MongoClient.connect(dbCredentials.localHost, { useNewUrlParser: true, useUnified
             batTemp4: 1
 
         }
-        let data = await db.collection(collections.raneLogsHistory).aggregate([
-            { $project: projection },
-            {
-                $group: {
-                    _id: { imei: "$imei", date: "$date" },
-                    docs: { $push: "$$ROOT" }
+        let batteries = await db.collection(collections.raneLogsHistory).distinct("imei");
+        let temp = [];
+        for (let index = 0; index < batteries.length; index++) {
+            let options = [
+                { $project: projection },
+                { $match: { imei: batteries[index] } },
+                {
+                    $group: {
+                        _id: { imei: "$imei", date: "$date" },
+                        docs: { $push: "$$ROOT" }
+                    }
+                }
+            ]
+            temp.push(getBatData(db, options));
+            if (temp.length == 1000) {
+                let data = await Promise.all(temp);
+                for (let index = 0; index < data.length; index++) {
+                    if (data[index].length == 1) {
+                        let dayWiseData = await dayWiseCalc(data[index][0]);
+                        const query = { imei: dayWiseData.imei, date: dayWiseData.date };
+                        const update = { $set: dayWiseData };
+                        const options = { upsert: true };
+                        db.collection("rane_day_wise_data").updateOne(query, update, options);
+                    }
+                    else {
+                        for (let inner = 0; inner < data[index].length; inner++) {
+                            let dayWiseData = await dayWiseCalc(data[index][inner]);
+                            const query = { imei: dayWiseData.imei, date: dayWiseData.date };
+                            const update = { $set: dayWiseData };
+                            const options = { upsert: true };
+                            db.collection("rane_day_wise_data").updateOne(query, update, options);
+                        }
+                    }
+                }
+                temp = [];
+            }
+        }
+        let data = await Promise.all(temp);
+        for (let index = 0; index < data.length; index++) {
+            if (data[index].length == 1) {
+                let dayWiseData = await dayWiseCalc(data[index][0]);
+                const query = { imei: dayWiseData.imei, date: dayWiseData.date };
+                const update = { $set: dayWiseData };
+                const options = { upsert: true };
+                db.collection("rane_day_wise_data").updateOne(query, update, options);
+            }
+            else {
+                for (let inner = 0; inner < data[index].length; inner++) {
+                    let dayWiseData = await dayWiseCalc(data[index][inner]);
+                    const query = { imei: dayWiseData.imei, date: dayWiseData.date };
+                    const update = { $set: dayWiseData };
+                    const options = { upsert: true };
+                    db.collection("rane_day_wise_data").updateOne(query, update, options);
                 }
             }
-        ],
-            { allowDiskUse: true }).toArray();
-        let allResult = [];
-        for (let index = 0; index < data.length; index++) {
-            let dayWiseData = await dayWiseCalc(data[index]);
-            const query = { imei: dayWiseData.imei, date: dayWiseData.date };
-            const update = { $set: dayWiseData };
-            const options = { upsert: true };
-            allResult.push(db.collection("rane_day_wise_data").updateOne(query, update, options));
-
-
         }
-        await Promise.all(allResult);
-        console.log("Completed");
-
 
     });
 
